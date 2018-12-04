@@ -1,0 +1,85 @@
+// Data by study including: 
+//	(1) construct-level topic probabilities
+//	(2) whether coordinates were reported in each brain structure
+var nStudies = 3000;
+var nTopics = 42;
+var rawTopicData = csv.read('lda/topics_per_doc_42topics_sklearn_batch_200iter_thres0p01.csv').slice(1, nStudies+1);
+var pmids = mapN(function(i) { return rawTopicData[i][0] }, nStudies);
+var topicData = mapN(function(i) { return rawTopicData[i].slice(1, nTopics+1) }, nStudies);
+var rawStructData = csv.read('data/dcm_0mm_thres0.csv').slice(1, nStudies+1);
+var structData = mapN(function(i) { return rawStructData[i].slice(1, 115) }, nStudies);
+var structures = csv.read('data/dcm_0mm_thres0.csv')[0].slice(1,115);
+
+// Alternative proposal distribution for Metropolis-Hastings algorithm
+var uniformKernel = function(prevVal) {
+  return Uniform({a: prevVal - 0.2, b: prevVal + 0.2});
+};
+
+// Helper function
+var merge = function(m, d){
+  var keys = _.keys(d)
+  return map(function(k){
+  	return { model: m[k], data: d[k], item:k } 
+  }, keys)
+};
+
+// Hyper-parameters for inference algorithm
+var nSamples = 300;
+var opts = {method: 'incrementalMH', samples: nSamples, burn: nSamples/2, verbose: false }
+
+// Model fitting and evaluation by brain structure
+var eval = mapN(function(structure){
+
+  display('Modeling ' + structures[structure]);
+
+  var multipleRegression = function(){
+
+	  var b = repeat(nTopics+1, function() { return sample(Uniform({ a: -1, b: 1 }), { driftKernel: uniformKernel }) });
+	  var sigma = sample(Uniform({a: 0, b: 2}), {driftKernel: uniformKernel});
+
+	  var predictions = mapN(function(study){
+
+	    // Logistic regression equation
+	    var predicted_y = sum(mapN(function(i) { return topicData[study][i] * b[i+1] }, nTopics));
+	    var predicted_y = predicted_y + b[0];
+	    var predicted_y = 1 / (1 + Math.exp(-1 * (predicted_y)));
+	    observe(Gaussian({mu: predicted_y, sigma: sigma}), structData[study][structure]);
+	    return [pmids[study], predicted_y];
+
+	  }, nStudies);
+
+	  return {
+	    parameters: { b0: b[0], b1: b[1], b2: b[2], b3: b[3], b4: b[4], b5: b[5], b6: b[6], b7: b[7], b8: b[8], b9: b[9], b10: b[10], b11: b[11], b12: b[12], b13: b[13], b14: b[14], b15: b[15], b16: b[16], b17: b[17], b18: b[18], b19: b[19], b20: b[20], b21: b[21], b22: b[22], b23: b[23], b24: b[24], b25: b[25], b26: b[26], b27: b[27], b28: b[28], b29: b[29], b30: b[30], b31: b[31], b32: b[32], b33: b[33], b34: b[34], b35: b[35], b36: b[36], b37: b[37], b38: b[38], b39: b[39], b40: b[40], b41: b[41], b42: b[42], sigma: sigma },
+	    predictives: _.fromPairs(predictions, 2)
+	  };
+	};
+
+	var obsVals = mapN(function(i) { return [pmids[i], structData[i][structure]]}, nStudies);
+	var obsVals = _.fromPairs(obsVals, 2);
+
+	var posterior = Infer(opts, multipleRegression);
+	var parameterPosterior = marginalize(posterior, function(x){return x.parameters});
+	var posteriorPredictive = marginalize(posterior, function(x){return x.predictives});
+	var modelDataDF = merge(posteriorPredictive.MAP().val, obsVals);
+
+	var tp = sum(map(function(x){ return ((x.model >= 0.5) & (x.data == 1)) ? 1 : 0 }, modelDataDF));
+	var fp = sum(map(function(x){ return ((x.model >= 0.5) & (x.data == 0)) ? 1 : 0 }, modelDataDF));
+	var tn = sum(map(function(x){ return ((x.model < 0.5) & (x.data == 0)) ? 1 : 0 }, modelDataDF));
+	var fn = sum(map(function(x){ return ((x.model < 0.5) & (x.data == 1)) ? 1 : 0 }, modelDataDF));
+	var precision = tp / (tp + fp);
+	var recall = tp / (tp + fn);
+	var f1 = 2 / ((1/precision) + (1/recall));
+	var accuracy = (tp + tn) / (tp + tn + fp + fn);
+
+	var p = parameterPosterior.MAP().val;
+	var structSummary = [structures[structure], p.b0, p.b1, p.b2, p.b3, p.b4, p.b5, p.b6, p.b7, p.b8, p.b9, p.b10, p.b11, p.b12, p.b13, p.b14, p.b15, p.b16, p.b17, p.b18, p.b19, p.b20, p.b21, p.b22, p.b23, p.b24, p.b25, p.b26, p.b27, p.b28, p.b29, p.b30, p.b31, p.b32, p.b33, p.b34, p.b35, p.b36, p.b37, p.b38, p.b39, p.b40, p.b41, p.b42, p.sigma, tp, fp, tn, fn, precision, recall, f1, accuracy];
+	return structSummary;
+
+}, structures.length);
+//}, 2);
+
+var topics = mapN(function(i) { return 'TOPIC_' + (i+1) }, 42);
+var headers = ['STRUCTURE', 'INTERCEPT'].concat(topics).concat(['SIGMA', 'TP', 'FP', 'TN', 'FN', 'PRECISION', 'RECALL', 'F1', 'ACCURACY']);
+var output = [headers].concat(eval);
+csv.write(output, 'inference/forward_' + nTopics + 'topics_' + nStudies + 'studies_' + nSamples + 'samp.csv');
+
