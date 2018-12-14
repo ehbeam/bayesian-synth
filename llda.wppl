@@ -1,0 +1,97 @@
+// Number of topics is prespecified 
+var nTopics = 2;
+
+// Load the vocabulary
+var vocab = csv.read('data/vocab_example.csv')[0];
+display('The vocab contains ' + vocab.length.toString() + ' words');
+
+// Load the corpus
+var nDocs = 5;
+var docs = csv.read('data/docs_example_difficult.csv').slice(0, nDocs);
+display('The corpus contains ' + docs.length.toString() + ' documents');
+
+// Load the document labels
+var labels = csv.read('data/labels_example.csv');
+
+// Whether to export the topic-word and document-topic distributions
+var exportBool = false;
+
+// Whether to display the perplexity output
+var displayBool = true;
+
+// For this demonstration, we'll track the effect of the sample number on perplexity
+var nIter = 100;
+var nSampleList = repeat(nIter, function() { map(function(n) { return n }, [1, 5, 10, 50, 100, 500, 1000, 2500, 5000, 7500, 10000]) });
+var nSampleList = [].concat.apply([], nSampleList);
+var perplexity = map(function(nSamples) {
+
+	// Priors are Dirichlet distributions for words in topics and topics in documents
+	var makeWordDist = function() { dirichlet(ones([vocab.length,1])) };
+	var makeTopicDist = function() { dirichlet(ones([nTopics,1])) };
+
+	// Latent Dirichlet allocation model
+	var model = function() {
+	  var wordDistForTopic = repeat(nTopics, makeWordDist);
+	  var topicDistForDoc = repeat(nDocs, makeTopicDist);
+	  mapObject(function(doc, words) {
+	    var topicDist = topicDistForDoc[doc];
+	    map(function(word) {
+	      var topic = discrete(topicDist);
+	      if (labels[doc].indexOf(topic) > -1) {
+	      	var wordDist = wordDistForTopic[topic];
+	      	var wordID = vocab.indexOf(word);
+	      	observe(Discrete({ps: wordDist}), wordID);
+	      }
+	    }, words);
+	  }, docs);
+	return [map(function(v) { return _.toArray(v.data); }, wordDistForTopic), 
+			map(function(v) { return _.toArray(v.data); }, topicDistForDoc)]; 
+	};
+
+	// Estimate the word and topic distributions
+	var nBurn = 0, nLag = 0;
+	var post = IncrementalMH(model, {samples: nSamples, verbose: false, onlyMAP: true, burn: nBurn, lag: nLag});
+	var samp = sample(post);
+
+	// Process the distributions
+	var wordDistForTopic = samp[0];
+	var wordDistForTopicResults = _.zip.apply(_, wordDistForTopic);
+	var wordDistForTopicResults = mapN(function(i) { return [vocab[i]].concat(wordDistForTopicResults[i])}, vocab.length);
+	var topicDistForDoc = samp[1];
+
+	// Export the distributions
+	if (exportBool) {
+		csv.write(wordDistForTopicResults, 'lda/llda_example_' + nDocs + 'docs_' + nSamples + 'samp_' + nBurn + 'burn_' + nLag + 'lag_wordDistForTopic.csv');
+		csv.write(topicDistForDoc, 'lda/llda_example_' + nDocs + 'docs_' + nSamples + 'samp_' + nBurn + 'burn_' + nLag + 'lag_topicDistForDoc.csv');
+	}
+	
+	// Compute the likelihood of words under the model
+	var likelihood = mapN(function(doc) {
+	  var topicDist = topicDistForDoc[doc];
+	  map(function(word) {
+	  	  var topic = discrete(topicDist);
+	  	  var wordDist = wordDistForTopic[topic];
+	      var wordID = vocab.indexOf(word);
+	      var L = Discrete({ps: wordDist}).score(wordID);
+	      return L;
+	  }, docs[doc]);
+	}, docs.length);
+
+	// Compute perplexity from the word likelihoods
+	var likelihoodSum = sum(map(function(L) { return sum(L) }, likelihood));
+	var nWords = sum(map(function(L) { return L.length }, likelihood));
+	return Math.exp(-1 * likelihoodSum / nWords);
+
+}, nSampleList);
+
+// Export the perplexity results
+var results = _.zip(nSampleList, perplexity);
+csv.write(results, 'lda/llda_example_perplexity.csv');
+
+// Display the perplexity results
+if (displayBool) {
+	display('\nNumber of samples:');
+	display(nSampleList);
+	display('\nPerplexity:');
+	display(perplexity);
+};
